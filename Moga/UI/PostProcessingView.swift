@@ -6,6 +6,8 @@ struct PostProcessingView: View {
     @State private var selectedProject: MogaProject? = nil
     @State private var isProcessing = false
     @State private var statusMessage = ""
+    @State private var uploader = CloudUploader()
+    @AppStorage("apiKey") private var apiKey: String = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
@@ -49,6 +51,14 @@ struct PostProcessingView: View {
                             icon: "square.and.arrow.up",
                             description: "Generate a .mg file for Meshroom."
                         ) { exportMeshroom(project: project) }
+
+                        Divider()
+
+                        actionButton(
+                            title: "Upload to OpenScan Cloud",
+                            icon: "icloud.and.arrow.up",
+                            description: "Zip and upload photos. Results emailed to your account."
+                        ) { await uploadToCloud(project: project) }
                     }
                     .padding(8)
                 }
@@ -174,6 +184,24 @@ struct PostProcessingView: View {
             NSWorkspace.shared.selectFile(url.path, inFileViewerRootedAtPath: "")
             statusMessage = "Meshroom project saved."
         }
+    }
+
+    private func uploadToCloud(project: MogaProject) async {
+        isProcessing = true
+        statusMessage = "Zipping project…"
+        guard let zipURL = try? await projectManager.zipProject(project) else {
+            statusMessage = "Failed to create zip."
+            isProcessing = false
+            return
+        }
+        statusMessage = "Uploading to OpenScan Cloud…"
+        await uploader.upload(zipURL: zipURL, apiKey: apiKey)
+        switch uploader.state {
+        case .done:           statusMessage = "Upload complete. Check your email for results."
+        case .failed(let m):  statusMessage = m
+        default:              break
+        }
+        isProcessing = false
     }
 
     private func cgImageToJPEGData(_ image: CGImage) -> Data? {
