@@ -1,7 +1,7 @@
 import Foundation
 import AppKit
 
-struct MogaProject: Codable {
+struct MogaProject: Codable, Identifiable, Hashable {
     let id: UUID
     var name: String
     let createdAt: Date
@@ -62,7 +62,7 @@ final class ProjectManager {
     func zipProject(_ project: MogaProject) async throws -> URL {
         let sourceURL = photosURL(project)
         let zipURL = projectURL(project).appendingPathComponent("\(project.name).zip")
-        try await Task.detached(priority: .utility) {
+        await Task.detached(priority: .utility) {
             let coordinator = NSFileCoordinator()
             var error: NSError?
             coordinator.coordinate(readingItemAt: sourceURL, options: .forUploading, error: &error) { url in

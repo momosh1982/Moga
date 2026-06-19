@@ -11,7 +11,8 @@ import SwiftUI
 struct MogaApp: App {
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            MainWindowView()
         }
+        .defaultSize(width: 900, height: 600)
     }
 }
