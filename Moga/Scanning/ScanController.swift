@@ -1,5 +1,8 @@
 import Foundation
 import AppKit
+import Accelerate
+import ImageIO
+import UniformTypeIdentifiers
 
 // Drives a scan session.
 //
@@ -246,55 +249,65 @@ final class ScanController {
     }
 
     private static func yuv420ToJpeg(_ yuv: Data, width: Int, height: Int) -> Data? {
-        let yLen = width * height
+        let yLen  = width * height
         let uvLen = (width / 2) * (height / 2)
         guard yuv.count >= yLen + 2 * uvLen else { return nil }
 
-        // Build RGBA pixel buffer from YUV420 (I420/YV12 plane layout)
-        var rgba = Data(count: width * height * 4)
-        yuv.withUnsafeBytes { src in
-            rgba.withUnsafeMutableBytes { dst in
-                let y = src.baseAddress!.assumingMemoryBound(to: UInt8.self)
-                let cb = y.advanced(by: yLen)
-                let cr = cb.advanced(by: uvLen)
-                let out = dst.baseAddress!.assumingMemoryBound(to: UInt8.self)
+        // Build vImage_YpCbCrToARGB conversion info (Rec.601 full-range, matching libcamera output)
+        var pixelRange = vImage_YpCbCrPixelRange(
+            Yp_bias: 0, CbCr_bias: 128,
+            YpRangeMax: 255, CbCrRangeMax: 255,
+            YpMax: 255, YpMin: 1, CbCrMax: 255, CbCrMin: 0
+        )
+        var convInfo = vImage_YpCbCrToARGB()
+        guard vImageConvert_YpCbCrToARGB_GenerateConversion(
+            kvImage_YpCbCrToARGBMatrix_ITU_R_601_4,
+            &pixelRange, &convInfo,
+            kvImage420Yp8_Cb8_Cr8, kvImageARGB8888, 0
+        ) == kvImageNoError else { return nil }
 
-                for row in 0..<height {
-                    for col in 0..<width {
-                        let yi = row * width + col
-                        let uvi = (row / 2) * (width / 2) + (col / 2)
-                        let yv = Int(y[yi])
-                        let u  = Int(cb[uvi]) - 128
-                        let v  = Int(cr[uvi]) - 128
-                        let r = min(255, max(0, yv + Int(1.402 * Float(v))))
-                        let g = min(255, max(0, yv - Int(0.344136 * Float(u)) - Int(0.714136 * Float(v))))
-                        let b = min(255, max(0, yv + Int(1.772 * Float(u))))
-                        let idx = (row * width + col) * 4
-                        out[idx]   = UInt8(r)
-                        out[idx+1] = UInt8(g)
-                        out[idx+2] = UInt8(b)
-                        out[idx+3] = 255
-                    }
-                }
+        // Set up source planar buffers (no copy — point into yuv Data)
+        let argbRowBytes = width * 4
+        var argbData = [UInt8](repeating: 0, count: height * argbRowBytes)
+
+        let result: vImage_Error = yuv.withUnsafeBytes { raw in
+            let base = raw.baseAddress!.assumingMemoryBound(to: UInt8.self)
+            var yBuf  = vImage_Buffer(data: UnsafeMutableRawPointer(mutating: base),
+                                      height: vImagePixelCount(height), width: vImagePixelCount(width),
+                                      rowBytes: width)
+            var cbBuf = vImage_Buffer(data: UnsafeMutableRawPointer(mutating: base + yLen),
+                                      height: vImagePixelCount(height / 2), width: vImagePixelCount(width / 2),
+                                      rowBytes: width / 2)
+            var crBuf = vImage_Buffer(data: UnsafeMutableRawPointer(mutating: base + yLen + uvLen),
+                                      height: vImagePixelCount(height / 2), width: vImagePixelCount(width / 2),
+                                      rowBytes: width / 2)
+            return argbData.withUnsafeMutableBytes { argbRaw in
+                var argbBuf = vImage_Buffer(data: argbRaw.baseAddress!,
+                                            height: vImagePixelCount(height), width: vImagePixelCount(width),
+                                            rowBytes: argbRowBytes)
+                return vImageConvert_420Yp8_Cb8_Cr8ToARGB8888(&yBuf, &cbBuf, &crBuf, &argbBuf,
+                                                                &convInfo, nil, 255, 0)
             }
         }
+        guard result == kvImageNoError else { return nil }
 
-        // 3. Encode RGBA → JPEG
-        guard let provider = CGDataProvider(data: rgba as CFData),
+        // ARGB → JPEG via CGImageDestination (much faster than NSImage roundtrip)
+        guard let provider = CGDataProvider(data: Data(argbData) as CFData),
               let cgImage = CGImage(
                 width: width, height: height,
                 bitsPerComponent: 8, bitsPerPixel: 32,
-                bytesPerRow: width * 4,
+                bytesPerRow: argbRowBytes,
                 space: CGColorSpaceCreateDeviceRGB(),
-                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue),
                 provider: provider, decode: nil, shouldInterpolate: false,
                 intent: .defaultIntent
               ) else { return nil }
 
-        let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: width, height: height))
-        guard let tiff = nsImage.tiffRepresentation,
-              let bitmap = NSBitmapImageRep(data: tiff) else { return nil }
-        return bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.85])
+        let jpegData = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(jpegData, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(dest, cgImage, [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary)
+        guard CGImageDestinationFinalize(dest) else { return nil }
+        return jpegData as Data
     }
 
     // MARK: - Fibonacci sphere position calculation

@@ -4,12 +4,13 @@ import AppKit
 struct MogaProject: Codable, Identifiable, Hashable {
     let id: UUID
     var name: String
+    var folderName: String      // name + timestamp, e.g. "MyObject_20260620_1430"
     let createdAt: Date
     var photoCount: Int
     var patternName: String
     var focusStackEnabled: Bool
     var stackSize: Int
-    var baseURL: URL?   // nil = default Documents/Moga Projects
+    var baseURL: URL?           // nil = default Documents/Moga Projects
 }
 
 @Observable
@@ -22,7 +23,7 @@ final class ProjectManager {
 
     func projectURL(_ project: MogaProject) -> URL {
         let base = project.baseURL ?? defaultRootURL
-        return base.appendingPathComponent(project.name, isDirectory: true)
+        return base.appendingPathComponent(project.folderName, isDirectory: true)
     }
 
     func photosURL(_ project: MogaProject) -> URL {
@@ -31,11 +32,19 @@ final class ProjectManager {
 
     // MARK: - Create
 
+    private static let folderDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyyMMdd_HHmm"
+        return f
+    }()
+
     func createProject(name: String, photoCount: Int, pattern: String,
                        focusStack: Bool, stackSize: Int,
                        outputFolder: URL? = nil) throws -> MogaProject {
+        let timestamp = Self.folderDateFormatter.string(from: Date())
+        let folderName = "\(name)_\(timestamp)"
         let project = MogaProject(
-            id: UUID(), name: name, createdAt: Date(),
+            id: UUID(), name: name, folderName: folderName, createdAt: Date(),
             photoCount: photoCount, patternName: pattern,
             focusStackEnabled: focusStack, stackSize: stackSize,
             baseURL: outputFolder
@@ -81,13 +90,30 @@ final class ProjectManager {
     func loadProjects() {
         guard let contents = try? FileManager.default.contentsOfDirectory(
             at: defaultRootURL, includingPropertiesForKeys: nil) else { return }
-        projects = contents.compactMap { url in
+        let decoder = JSONDecoder()
+        projects = contents.compactMap { url -> MogaProject? in
             let metaURL = url.appendingPathComponent("project.json")
-            guard let data = try? Data(contentsOf: metaURL),
-                  let project = try? JSONDecoder().decode(MogaProject.self, from: data)
-            else { return nil }
-            return project
+            guard let data = try? Data(contentsOf: metaURL) else { return nil }
+            if var project = try? decoder.decode(MogaProject.self, from: data) {
+                return project
+            }
+            // Legacy projects saved before folderName was added — synthesise it from the folder name on disk
+            if var legacy = try? decoder.decode(LegacyMogaProject.self, from: data) {
+                return MogaProject(id: legacy.id, name: legacy.name,
+                                   folderName: url.lastPathComponent,
+                                   createdAt: legacy.createdAt, photoCount: legacy.photoCount,
+                                   patternName: legacy.patternName,
+                                   focusStackEnabled: legacy.focusStackEnabled,
+                                   stackSize: legacy.stackSize, baseURL: nil)
+            }
+            return nil
         }.sorted { $0.createdAt > $1.createdAt }
+    }
+
+    private struct LegacyMogaProject: Decodable {
+        let id: UUID; var name: String; let createdAt: Date
+        var photoCount: Int; var patternName: String
+        var focusStackEnabled: Bool; var stackSize: Int
     }
 
     func openProjectFolder(_ project: MogaProject) {
